@@ -1,0 +1,125 @@
+name: "Terraform Plan"
+description: "Terraform plan to support multiple cloud providers"
+
+inputs:
+  tfplan-name:
+    required: false
+    description: "The filename to use for the output Terraform plan file."
+    default: "tfplan.tfplan"
+  output-tfplan:
+    required: false
+    description: "If a Terraform plan file should be output as an artifact."
+    default: "false"
+  github-token:
+    required: false
+    description: "GitHub token to create pull request comment"
+    default: "false"
+  init-outcome:
+    required: false
+    description: "Terraform init command outcome"
+    default: "Not Provided"
+
+outputs:
+  plan-outcome:
+    description: "Terraform plan command outcome"
+    value: ${{ steps.plan.outcome }}
+
+runs:
+  using: "composite"
+  steps:
+    # Checks that all Terraform configuration files adhere to a canonical format
+    - name: Terraform Format
+      id: fmt
+      shell: bash
+      run: terraform fmt -check
+    
+    # Checks that all Terraform configuration files have the correct syntax
+    - name: Terraform Validate
+      id: validate
+      shell: bash
+      run: terraform validate
+
+    # Run the Terraform plan
+    - name: Terraform Plan
+      id: plan
+      shell: bash
+      run: terraform plan -input=false -out="./${{ inputs.tfplan-name }}" | tee plan.out
+
+    # Create / update pull request with a comment showing the Terraform outputs
+    - name: Pull Request Comment
+      uses: actions/github-script@v7
+      if: github.event_name == 'pull_request' && inputs.github-token != 'false'
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          // Get all comments for PR
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          })
+
+          // Get the bot comment
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes('Terraform Plan')
+          })
+
+          // Prepare the comment format
+          const run_url = process.env.GITHUB_SERVER_URL + '/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID
+          const run_link = '<a href="' + run_url + '">Actions</a>.'
+          const fs = require('fs')
+          const plan_file = fs.readFileSync('plan.out', 'utf8')
+          const plan = plan_file.length > 65000 ? plan_file.toString().substring(0, 65000) + " ..." : plan_file
+          const truncated_message = plan_file.length > 65000 ? "Output is too long and was truncated. You can read full Plan in " + run_link + "<br /><br />" : ""
+          
+          const output = `## ${{ github.workflow }} - ${{ inputs.environment || github.event.repository.name }}
+          #### Terraform Initialization ⚙️ \`${{ inputs.init-outcome }}\`
+          #### Terraform Format and Style 🖌 \`${{ steps.fmt.outcome }}\`
+          #### Terraform Validation 🤖 \`${{ steps.validate.outcome }}\`
+          <details><summary>Validation Output</summary>
+
+          \`\`\`\n
+          ${{ steps.validate.outputs.stdout }}
+          \`\`\`
+
+          </details>
+
+          #### Terraform Plan 📖 \`${{ steps.plan.outcome }}\`
+
+          <details><summary>Show Plan</summary>
+
+          \`\`\`terraform\n
+          ${plan}
+          \`\`\`
+
+          </details>
+          ${truncated_message}
+
+          *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ github.workspace }}\`, Workflow: \`${{ github.workflow }}\`, Environment: \`${{ inputs.environment || 'N/A' }}\`*`;          
+
+          // Check if creating or updating existing comment
+          if (botComment) {
+            github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: output
+            })
+          } else {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+          }             
+
+    # Upload the Terraform plan as an artifact
+    - name: Upload Plan
+      if: inputs.output-tfplan == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.tfplan-name }}
+        path: "**/${{ inputs.tfplan-name }}"
+        if-no-files-found: error
+        overwrite: true
