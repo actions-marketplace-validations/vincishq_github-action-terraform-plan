@@ -1,5 +1,9 @@
-name: "Terraform Plan"
+name: "Vincis Terraform Plan"
 description: "Terraform plan to support multiple cloud providers"
+
+branding:
+  icon: refresh-cw
+  color: purple
 
 inputs:
   tfplan-name:
